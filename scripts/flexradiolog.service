@@ -1,0 +1,23 @@
+[Unit]
+Description=FlexRadio 6400 Monitoring and Logging Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/flexradiolog
+ExecStart=/opt/flexradiolog/.venv/bin/python -m flexradiolog.main -c /opt/flexradiolog/config.yaml
+Restart=always
+RestartSec=5s
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+# Security sandbox settings
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

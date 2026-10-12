@@ -1,0 +1,28 @@
+# FlexRadioLog Konfigurationsdatei
+
+radio:
+  host: "192.168.84.24"
+  port: 4992
+  reconnect_interval_sec: 3.0
+  reconnect_max_backoff_sec: 30.0
+  timeout_sec: 10.0
+
+database:
+  url: "sqlite+aiosqlite:///flexradiolog.db"
+  echo: false
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  title: "FlexRadioLog API"
+
+logging:
+  level: "INFO"
+  file_path: "flexradiolog.log"
+
+# Initiale IP-zu-Rufzeichen Zuordnungen (werden beim ersten Start in die DB importiert)
+initial_allocations:
+  - ip_address: "192.168.84.100"
+    callsign: "HB9XYZ"
+    operator_name: "Max Muster"
+    notes: "Shack PC"
