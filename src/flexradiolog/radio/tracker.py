@@ -20,6 +20,16 @@ from flexradiolog.radio.parser import ParsedMessage, parse_frequency_hz
 logger = logging.getLogger(__name__)
 
 
+def normalize_handle(handle: Optional[str]) -> str:
+    """Normalize handle to lowercase hex string with 0x prefix."""
+    if not handle:
+        return ""
+    h = handle.strip().lower()
+    if not h.startswith("0x"):
+        h = f"0x{h}"
+    return h
+
+
 @dataclass
 class ActiveSessionInfo:
     """In-memory representation of an active client session."""
@@ -69,6 +79,10 @@ class RadioStateTracker:
         self.current_ptt: Optional[ActivePttInfo] = None
         # IP to callsign cache
         self.ip_cache: Dict[str, str] = {}
+        # Discovered client info from UDP discovery (norm_handle -> dict)
+        self.discovered_clients: Dict[str, dict] = {}
+        # Latest in-use or connected IP
+        self.latest_inuse_ip: Optional[str] = None
 
     async def reload_ip_cache(self) -> None:
         """Load or refresh the IP-to-callsign allocation cache from database."""
@@ -92,15 +106,80 @@ class RadioStateTracker:
 
         return ip_address or "UNKNOWN"
 
+    def find_active_session(
+        self,
+        uuid: Optional[str] = None,
+        handle: Optional[str] = None,
+    ) -> Optional[ActiveSessionInfo]:
+        """Find active session by UUID or handle."""
+        if uuid and uuid in self.active_sessions_by_uuid:
+            return self.active_sessions_by_uuid[uuid]
+
+        norm_uuid = uuid.lower() if uuid else None
+        norm_h = normalize_handle(handle) if handle else None
+
+        for s in self.active_sessions_by_uuid.values():
+            if norm_uuid and s.client_uuid and s.client_uuid.lower() == norm_uuid:
+                return s
+            if norm_h and s.client_handle and normalize_handle(s.client_handle) == norm_h:
+                return s
+        return None
+
     def get_session_by_handle(self, handle: Optional[str]) -> Optional[ActiveSessionInfo]:
         """Find active session by client handle."""
         if not handle:
             return None
-        norm_handle = handle.lower()
+        norm_handle = normalize_handle(handle)
         for s in self.active_sessions_by_uuid.values():
-            if s.client_handle and s.client_handle.lower() == norm_handle:
+            if s.client_handle and normalize_handle(s.client_handle) == norm_handle:
                 return s
         return None
+
+    async def update_discovered_clients(
+        self,
+        handles: list[str],
+        ips: list[str],
+        programs: list[str],
+        stations: list[str],
+        inuse_ip: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> None:
+        """Update discovery mapping from UDP discovery broadcast packets."""
+        if inuse_ip:
+            self.latest_inuse_ip = inuse_ip
+
+        for i, h in enumerate(handles):
+            norm_h = normalize_handle(h)
+            if not norm_h:
+                continue
+            ip = ips[i] if i < len(ips) else ""
+            prog = programs[i] if i < len(programs) else ""
+            stn = stations[i] if i < len(stations) else ""
+
+            self.discovered_clients[norm_h] = {
+                "ip": ip,
+                "program": prog,
+                "station": stn,
+            }
+
+            # Check if an active session exists for this handle and needs IP/data enrichment
+            active_s = self.get_session_by_handle(norm_h)
+            if active_s and ip and (not active_s.client_ip or active_s.client_ip == "UNKNOWN"):
+                active_s.client_ip = ip
+                resolved_call = await self.resolve_callsign(ip, active_s.station or stn)
+                active_s.callsign = resolved_call
+                async for db_session in self.db.get_session():
+                    stmt = select(Session).where(Session.id == active_s.db_id)
+                    res = await db_session.execute(stmt)
+                    record = res.scalar_one_or_none()
+                    if record and record.is_active:
+                        record.client_ip = ip
+                        record.callsign = resolved_call
+                        if prog and not record.client_name:
+                            record.client_name = prog
+                        if stn and not record.station:
+                            record.station = stn
+                        await db_session.commit()
 
     def get_tx_slice(self) -> Optional[SliceInfo]:
         """Find current TX slice, or return slice 0 as default if present."""
@@ -114,18 +193,57 @@ class RadioStateTracker:
         return None
 
     async def handle_client_message(self, msg: ParsedMessage) -> None:
-        """Process 'client' status updates (connected=1 / connected=0)."""
-        uuid = msg.object_id
-        if not uuid:
+        """Process 'client' status updates (connected / disconnected)."""
+        raw_id = msg.object_id or ""
+        if not raw_id and "client_id" not in msg.attributes and "handle" not in msg.attributes:
             return
+
+        client_id_attr = msg.attributes.get("client_id", "").strip()
+        handle_attr = msg.attributes.get("handle", "").strip()
+        is_handle_id = raw_id.lower().startswith("0x")
+
+        if is_handle_id:
+            handle = raw_id
+            uuid = client_id_attr or raw_id
+        else:
+            uuid = client_id_attr or raw_id
+            handle = handle_attr or (raw_id if is_handle_id else None)
 
         connected = msg.attributes.get("connected")
         if connected == "1":
-            ip = msg.attributes.get("ip", "")
             station = msg.attributes.get("station", "")
-            name = msg.attributes.get("name", "")
-            gui = msg.attributes.get("gui", "1") == "1"
-            handle = msg.attributes.get("handle") or msg.handle
+            name = msg.attributes.get("program") or msg.attributes.get("name", "")
+            gui = (msg.attributes.get("gui", "1") == "1") and (msg.attributes.get("is_gui", "1") != "0")
+
+            # Resolve IP
+            norm_h = normalize_handle(handle) if handle else ""
+            discovered = self.discovered_clients.get(norm_h, {})
+            ip = msg.attributes.get("ip") or discovered.get("ip") or self.latest_inuse_ip or ""
+            if not station and discovered.get("station"):
+                station = discovered["station"]
+            if not name and discovered.get("program"):
+                name = discovered["program"]
+
+            # Prevent duplicate sessions if already active
+            existing = self.find_active_session(uuid=uuid, handle=handle)
+            if existing:
+                # Update info if newly available
+                if ip and (not existing.client_ip or existing.client_ip == "UNKNOWN"):
+                    existing.client_ip = ip
+                    existing.callsign = await self.resolve_callsign(ip, existing.station or station)
+                    async for db_session in self.db.get_session():
+                        stmt = select(Session).where(Session.id == existing.db_id)
+                        res = await db_session.execute(stmt)
+                        rec = res.scalar_one_or_none()
+                        if rec and rec.is_active:
+                            rec.client_ip = existing.client_ip
+                            rec.callsign = existing.callsign
+                            if name:
+                                rec.client_name = name
+                            if station:
+                                rec.station = station
+                            await db_session.commit()
+                return
 
             callsign = await self.resolve_callsign(ip, station)
             now = utc_now()
@@ -158,21 +276,25 @@ class RadioStateTracker:
                     gui=gui,
                 )
                 logger.info(
-                    "User connected: %s (IP: %s, App: %s, UUID: %s, DB-ID: %d)",
-                    callsign, ip, name, uuid, new_session.id
+                    "User connected: %s (IP: %s, App: %s, Handle: %s, UUID: %s, DB-ID: %d)",
+                    callsign, ip, name, handle, uuid, new_session.id
                 )
 
         elif connected == "0":
-            if uuid in self.active_sessions_by_uuid:
-                info = self.active_sessions_by_uuid.pop(uuid)
+            existing = self.find_active_session(uuid=uuid, handle=handle)
+            if existing:
+                to_remove = [k for k, v in self.active_sessions_by_uuid.items() if v.db_id == existing.db_id]
+                for k in to_remove:
+                    self.active_sessions_by_uuid.pop(k, None)
+
                 now = utc_now()
-                duration = calculate_duration_seconds(info.start_time, now)
+                duration = calculate_duration_seconds(existing.start_time, now)
 
                 async for db_session in self.db.get_session():
-                    stmt = select(Session).where(Session.id == info.db_id)
+                    stmt = select(Session).where(Session.id == existing.db_id)
                     res = await db_session.execute(stmt)
                     record = res.scalar_one_or_none()
-                    if record:
+                    if record and record.is_active:
                         record.is_active = False
                         record.end_time = now
                         record.duration_seconds = duration
@@ -180,8 +302,8 @@ class RadioStateTracker:
                         await db_session.commit()
 
                 logger.info(
-                    "User disconnected: %s (Duration: %d s, UUID: %s)",
-                    info.callsign, duration, uuid
+                    "User disconnected: %s (Duration: %d s, Handle: %s, UUID: %s)",
+                    existing.callsign, duration, existing.client_handle, existing.client_uuid
                 )
 
     async def handle_slice_message(self, msg: ParsedMessage) -> None:
@@ -286,6 +408,9 @@ class RadioStateTracker:
                 await self.handle_slice_message(msg)
             elif msg.object_type == "interlock":
                 await self.handle_interlock_message(msg)
+        elif msg.msg_type == "M":
+            if "ip" in msg.attributes:
+                self.latest_inuse_ip = msg.attributes["ip"]
 
     async def on_radio_disconnected(self, reason: str = "RADIO_DISCONNECTED") -> None:
         """Handle loss of connection to the radio."""

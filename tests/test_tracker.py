@@ -140,3 +140,78 @@ async def test_tracker_radio_disconnect():
         assert len(p_events) == 1
 
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_tracker_real_smartsdr_lifecycle():
+    db = Database(DatabaseConfig(url="sqlite+aiosqlite:///:memory:"))
+    await db.init_models()
+    await db.seed_initial_allocations([
+        IpAllocationItem(ip_address="192.168.84.249", callsign="HB9PAE", operator_name="Peter"),
+    ])
+
+    tracker = RadioStateTracker(db)
+    await tracker.reload_ip_cache()
+
+    # 1. Provide UDP discovery information (as received on port 4992)
+    await tracker.update_discovered_clients(
+        handles=["0x4B28E780"],
+        ips=["192.168.84.249"],
+        programs=["SmartSDR-Win"],
+        stations=["LVO17"],
+        inuse_ip="192.168.84.249",
+        status="In_Use",
+    )
+
+    # 2. Client connects via TCP status line
+    conn_line = "S6C8273F4|client 0x4B28E780 connected local_ptt=1 client_id=E5110FDA-1433-424F-ABA9-40724CA3644A program=SmartSDR-Win station=LVO17"
+    msg_conn = ProtocolParser.parse_line(conn_line)
+    await tracker.process_message(msg_conn)
+
+    session_info = tracker.find_active_session(handle="0x4b28e780")
+    assert session_info is not None
+    assert session_info.callsign == "HB9PAE"
+    assert session_info.client_ip == "192.168.84.249"
+    assert session_info.client_handle == "0x4B28E780"
+    assert session_info.client_uuid == "E5110FDA-1433-424F-ABA9-40724CA3644A"
+    assert session_info.client_name == "SmartSDR-Win"
+
+    # 3. Repeated connection message does not create a duplicate
+    await tracker.process_message(msg_conn)
+    async for session in db.get_session():
+        stmt = select(Session)
+        res = await session.execute(stmt)
+        sessions = res.scalars().all()
+        assert len(sessions) == 1
+
+    # 4. PTT event matched by client handle
+    slice_line = "S6C8273F4|slice 0 RF_frequency=14.080000 mode=DIGU tx=1 client_handle=0x4B28E780"
+    await tracker.process_message(ProtocolParser.parse_line(slice_line))
+
+    tx_start = "S0|interlock tx_client_handle=0x4B28E780 state=TRANSMITTING source=SW"
+    await tracker.process_message(ProtocolParser.parse_line(tx_start))
+    assert tracker.current_ptt is not None
+    assert tracker.current_ptt.session_id == session_info.db_id
+    assert tracker.current_ptt.frequency_hz == 14_080_000
+
+    tx_end = "S0|interlock tx_client_handle=0x0 state=READY source="
+    await tracker.process_message(ProtocolParser.parse_line(tx_end))
+    assert tracker.current_ptt is None
+
+    # 5. Client disconnects with handle-based disconnected status
+    disconn_line = "S6C8273F4|client 0x4B28E780 disconnected"
+    msg_disconn = ProtocolParser.parse_line(disconn_line)
+    await tracker.process_message(msg_disconn)
+
+    assert tracker.find_active_session(handle="0x4b28e780") is None
+
+    # Verify session closed in DB
+    async for session in db.get_session():
+        stmt = select(Session).where(Session.id == session_info.db_id)
+        res = await session.execute(stmt)
+        db_s = res.scalar_one()
+        assert db_s.is_active is False
+        assert db_s.disconnect_reason == "LOGOUT"
+        assert db_s.duration_seconds is not None
+
+    await db.close()

@@ -19,7 +19,7 @@ class ParsedMessage:
 
 
 def parse_key_value_pairs(text: str) -> Dict[str, str]:
-    """Parse space-separated key=value pairs into a dictionary with lowercased keys."""
+    """Parse space-separated key=value pairs and boolean/status flags into a dictionary with lowercased keys."""
     attrs: Dict[str, str] = {}
     # Handles key=value and key="value with spaces"
     pattern = re.compile(r'([A-Za-z0-9_]+)=(?:"([^"]*)"|([^\s]+))')
@@ -27,6 +27,18 @@ def parse_key_value_pairs(text: str) -> Dict[str, str]:
         key = match.group(1).lower()
         val = match.group(2) if match.group(2) is not None else match.group(3)
         attrs[key] = val or ""
+
+    # Also capture standalone keywords if not already matched as key=value
+    for word in text.split():
+        if "=" not in word:
+            w_lower = word.lower()
+            if w_lower == "connected":
+                attrs["connected"] = "1"
+            elif w_lower == "disconnected":
+                attrs["connected"] = "0"
+            elif w_lower not in attrs:
+                attrs[w_lower] = "1"
+
     return attrs
 
 
@@ -109,16 +121,16 @@ class ProtocolParser:
                 kv_string = ""
 
                 if len(tokens) == 2:
-                    if "=" in tokens[1]:
+                    if "=" in tokens[1] or tokens[1].lower() in ("connected", "disconnected"):
                         kv_string = tokens[1]
                     else:
                         obj_id = tokens[1]
                 elif len(tokens) >= 3:
-                    if "=" in tokens[1]:
+                    if "=" in tokens[1] or tokens[1].lower() in ("connected", "disconnected"):
                         # e.g., interlock state=TRANSMITTING ...
                         kv_string = f"{tokens[1]} {tokens[2]}"
                     else:
-                        # e.g., client 0B3B59D0-... connected=1 ...
+                        # e.g., client 0x4B28E780 connected ... or client 0B3B59D0-... connected=1 ...
                         obj_id = tokens[1]
                         kv_string = tokens[2]
 
@@ -134,11 +146,16 @@ class ProtocolParser:
 
             # Message: M<code>|<text>
             if prefix.startswith("M"):
+                code = prefix[1:].strip()
+                attrs = {"message": payload}
+                m = re.search(r'Client connected from IP\s+([0-9a-fA-F.:]+)', payload, re.IGNORECASE)
+                if m:
+                    attrs["ip"] = m.group(1)
                 return ParsedMessage(
                     raw=raw,
                     msg_type="M",
-                    code=prefix[1:].strip(),
-                    attributes={"message": payload},
+                    code=code,
+                    attributes=attrs,
                 )
 
         return ParsedMessage(

@@ -42,6 +42,40 @@ def test_parse_client_status():
     assert msg.attributes["gui"] == "1"
 
 
+def test_parse_real_smartsdr_client_status():
+    # Real FlexRadio 6400 SmartSDR v4 status format
+    line = "S6C8273F4|client 0x4B28E780 connected local_ptt=1 client_id=E5110FDA-1433-424F-ABA9-40724CA3644A program=SmartSDR-Win station=LVO17\n"
+    msg = ProtocolParser.parse_line(line)
+    assert msg is not None
+    assert msg.msg_type == "S"
+    assert msg.object_type == "client"
+    assert msg.object_id == "0x4B28E780"
+    assert msg.attributes["connected"] == "1"
+    assert msg.attributes["local_ptt"] == "1"
+    assert msg.attributes["client_id"] == "E5110FDA-1433-424F-ABA9-40724CA3644A"
+    assert msg.attributes["program"] == "SmartSDR-Win"
+    assert msg.attributes["station"] == "LVO17"
+
+
+def test_parse_real_smartsdr_client_disconnect():
+    line = "S6C8273F4|client 0x4B28E780 disconnected\n"
+    msg = ProtocolParser.parse_line(line)
+    assert msg is not None
+    assert msg.msg_type == "S"
+    assert msg.object_type == "client"
+    assert msg.object_id == "0x4B28E780"
+    assert msg.attributes["connected"] == "0"
+
+
+def test_parse_m_message_ip():
+    line = "M10000001|Client connected from IP 192.168.84.249\n"
+    msg = ProtocolParser.parse_line(line)
+    assert msg is not None
+    assert msg.msg_type == "M"
+    assert msg.code == "10000001"
+    assert msg.attributes["ip"] == "192.168.84.249"
+
+
 def test_parse_interlock_status():
     line = "S0|interlock state=TRANSMITTING source=SW tx_client_handle=0x12345678 tx_allowed=1\n"
     msg = ProtocolParser.parse_line(line)
