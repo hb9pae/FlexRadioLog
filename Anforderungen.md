@@ -151,3 +151,21 @@ Das relationale Datenmodell in SQLite umfasst vier zentrale Tabellen:
 - [x] Start- und Installations-Skript für Raspberry Pi bereitgestellt (`scripts/install.sh`, `scripts/run.sh`)
 - [x] Dokumentation zur Inbetriebnahme und Anbindung des externen Auswerteprogramms erstellt (`README.md`)
 - [ ] End-to-End-Validierung vor Ort mit dem physischen FlexRadio 6400 (`192.168.84.24`)
+
+# Erweiterung LogGui
+Das LogGui erlaubt die Auswertung der Logs in der Datenbank. 
+Der Benutzer kann die Auswertungen mit einem Web-Browser abrufen und dabei vordefinierte oder 
+individuelle Zeitintervalle oder Benutzer betrachten.
+
+## Standardauswertungen
+- [x] Belegung FlexRadio 6400 der letzten 24 h, einer Kalenderwoche oder eines Kalendermonats
+- [x] Auswahl Benutzer (einzeln oder alle)
+- [x] Export der Daten in ein CSV-File (Auswahl Datumsfenster, Benutzer) mit UTF-8 BOM für Excel
+- [x] Weitere sinnvolle Auswertungen:
+  - KPI Dashboard (Gesamtsitzungen, Belegungszeit, Sendedauer, TX Duty Cycle, Aktive Benutzer)
+  - Visualisierung der Sendeaktivität nach Band (PTT Events)
+  - Visualisierung der Belegung nach Operator (Top Operators)
+  - Detailansicht pro Session mit Auflistung aller zugehörigen PTT-Transmissionsdaten (Frequenz, Band, Mode, TX-Slice)
+- [x] Eigenständige Applikation auf Raspberry Pi (Port 8080) mit Systemd-Dienst (`scripts/loggui.service`) und Startskript (`scripts/run_loggui.sh`)
+
+

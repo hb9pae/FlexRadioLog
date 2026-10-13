@@ -1,0 +1,22 @@
+[Unit]
+Description=FlexRadio 6400 LogGui Web Application
+After=network-online.target flexradiolog.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/FlexRadioLog
+ExecStart=/opt/FlexRadioLog/scripts/run_loggui.sh
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+# Security sandbox settings
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

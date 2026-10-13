@@ -6,8 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/opt/flexradiolog
-ExecStart=/opt/flexradiolog/.venv/bin/python -m flexradiolog.main -c /opt/flexradiolog/config.yaml
+WorkingDirectory=/opt/FlexRadioLog
+ExecStart=/opt/FlexRadioLog/.venv/bin/python -m flexradiolog.main -c /opt/FlexRadioLog/config.yaml
 Restart=always
 RestartSec=5s
 Environment=PYTHONUNBUFFERED=1

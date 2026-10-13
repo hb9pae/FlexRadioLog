@@ -65,17 +65,24 @@ Autarker Monitoring- und Logging-Server für **FlexRadio 6400** (SmartSDR TCP-AP
 
 ## 📦 Installation auf dem Raspberry Pi
 
-### 1. Repository klonen & vorbereiten
+### 1. Voraussetzungen installieren & Repository vorbereiten
+Auf dem Raspberry Pi (Raspberry Pi OS Bookworm empfohlen):
 ```bash
-git clone <repo-url> /opt/flexradiolog
-cd /opt/flexradiolog
+# Notwendige Systempakete installieren
+sudo apt update && sudo apt install -y python3 python3-venv python3-pip git
+
+# Repository klonen (empfohlen: /opt/FlexRadioLog)
+sudo mkdir -p /opt/FlexRadioLog && sudo chown -R $USER:$USER /opt/FlexRadioLog
+git clone <repo-url> /opt/FlexRadioLog
+cd /opt/FlexRadioLog
 ```
+*(Hinweis: Falls das Projekt in einem anderen Ordner wie `~/FlexRadioLog` abgelegt wird, können die Systemd-Dateien entsprechend angepasst werden).*
 
 ### 2. Installationsskript ausführen
 ```bash
 ./scripts/install.sh
 ```
-Das Skript erstellt die virtuelle Python-Umgebung, installiert alle notwendigen Pakete und legt bei Bedarf eine Standard-Konfiguration an.
+Das Skript prüft alle Voraussetzungen, erstellt die virtuelle Python-Umgebung (`.venv`), installiert alle Abhängigkeiten und generiert bei Bedarf eine Standard-`config.yaml`.
 
 ### 3. Konfiguration anpassen (`config.yaml`)
 ```yaml
@@ -204,3 +211,37 @@ source .venv/bin/activate
 # Alle Tests ausführen
 pytest -v
 ```
+
+---
+
+## 🖥️ Web-Oberfläche: LogGui (Port 8080)
+
+LogGui ist eine schlanke, moderne Web-Oberfläche (React + TypeScript + Vanilla CSS) zur interaktiven Auswertung der gesammelten FlexRadio-Logs direkt im Browser.
+
+### Funktionen im LogGui
+- **Radio- & Verbindungsstatus:** Live-Anzeige des Status des FlexRadio 6400 (Online/Offline, aktiver Sendezustand *TX AKTIV*, Anzahl verbundener SmartSDR Clients).
+- **Zeitfilterung:** Vordefinierte Intervalle (*Letzte 24h*, *Aktuelle Kalenderwoche*, *Aktueller Kalendermonat*, *Gesamt*) sowie ein individueller Datums- und Uhrzeitwähler.
+- **Benutzerfilterung:** Filterung nach einem spezifischen Funkamateur / Rufzeichen oder Anzeige aller Benutzer.
+- **KPI Dashboards:** Dynamische Berechnung von Gesamtsitzungen, Belegungszeit, Sendedauer (PTT TX), TX Duty Cycle (%) und aktiven Funkamateuren.
+- **Visualisierungen:** Balkenauswertung der Sendeaktivität nach Amateurfunkband sowie Belegung nach Operator.
+- **Interaktives Sitzungsprotokoll:** Sortierbare und durchsuchbare Datentabelle aller Sitzungen mit Schnellsuche nach Rufzeichen, Stationsname oder IP-Adresse.
+- **PTT-Detailansicht:** Ein Klick auf eine Sitzung öffnet alle einzelnen Sende-Events (Frequenz in MHz, Band, Betriebsart, Start-/Endzeit, Dauer).
+- **CSV-Export:** Export der aktuell gefilterten Sitzungsdaten als UTF-8 CSV-Datei (mit Semikolon-Trennzeichen und BOM, direkt kompatibel mit Microsoft Excel und LibreOffice).
+
+### LogGui starten
+
+#### Manueller Start:
+```bash
+./scripts/run_loggui.sh
+```
+Das Frontend ist anschließend im Browser unter `http://<Raspberry-Pi-IP>:8080` erreichbar.
+
+#### Als Systemd-Dienst (Autostart beim Booten):
+```bash
+sudo cp scripts/loggui.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable loggui
+sudo systemctl start loggui
+sudo systemctl status loggui
+```
+
