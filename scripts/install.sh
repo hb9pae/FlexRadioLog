@@ -1,9 +1,27 @@
 #!/usr/bin/env bash
 set -e
 
+# Argumente verarbeiten
+AUTO_INSTALL_SERVICES=false
+for arg in "$@"; do
+    case "$arg" in
+        --install-services|-s)
+            AUTO_INSTALL_SERVICES=true
+            ;;
+        --help|-h)
+            echo "Verwendung: $0 [OPTIONEN]"
+            echo "Optionen:"
+            echo "  --install-services, -s   Installiert, aktiviert und startet die Systemd-Dienste direkt"
+            echo "  --help, -h               Zeigt diese Hilfe an"
+            exit 0
+            ;;
+    esac
+done
+
 # In das Projekt-Stammverzeichnis wechseln
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_DIR"
+PROJECT_DIR="$SCRIPT_DIR"
 
 echo "=== FlexRadioLog & LogGui Installation für Raspberry Pi ==="
 
@@ -109,7 +127,96 @@ initial_allocations:
 EOF
 fi
 
-PROJECT_DIR="$SCRIPT_DIR"
+# Ziel-Benutzer und -Gruppe für den Dienstlauf ermitteln
+if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+    TARGET_USER="$SUDO_USER"
+elif [ -n "$USER" ] && [ "$USER" != "root" ]; then
+    TARGET_USER="$USER"
+elif id -u pi >/dev/null 2>&1; then
+    TARGET_USER="pi"
+else
+    TARGET_USER="$(id -un)"
+fi
+TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || echo "$TARGET_USER")"
+
+echo ""
+echo "=== Dateiberechtigungen & Benutzerkonfiguration ==="
+echo "Dienst-Benutzer: $TARGET_USER (Gruppe: $TARGET_GROUP)"
+echo "Projektpfad:     $PROJECT_DIR"
+
+# Berechtigungen für das gesamte Projektverzeichnis anpassen (verhindert PermissionError bei Logs und DB)
+if [ "$(id -u)" -eq 0 ]; then
+    echo "Passe Eigentümer und Berechtigungen auf $TARGET_USER:$TARGET_GROUP an..."
+    chown -R "$TARGET_USER:$TARGET_GROUP" "$PROJECT_DIR"
+    chmod -R u+rwX,g+rX "$PROJECT_DIR"
+else
+    NEED_CHOWN=false
+    if [ ! -w "$PROJECT_DIR" ]; then
+        NEED_CHOWN=true
+    fi
+    for check_file in "$PROJECT_DIR/flexradiolog.log" "$PROJECT_DIR/flexradiolog.db" "$PROJECT_DIR/config.yaml"; do
+        if [ -e "$check_file" ] && [ ! -w "$check_file" ]; then
+            NEED_CHOWN=true
+        fi
+    done
+
+    if [ "$NEED_CHOWN" = true ]; then
+        if command -v sudo >/dev/null 2>&1; then
+            echo "Schreibrechte im Projektverzeichnis fehlen. Korrigiere Eigentümer mittels sudo..."
+            sudo chown -R "$TARGET_USER:$TARGET_GROUP" "$PROJECT_DIR"
+            sudo chmod -R u+rwX,g+rX "$PROJECT_DIR"
+        else
+            echo "Warnung: Fehlende Schreibrechte in $PROJECT_DIR und 'sudo' ist nicht verfügbar."
+        fi
+    else
+        chmod -R u+rwX,g+rX "$PROJECT_DIR" 2>/dev/null || true
+    fi
+fi
+
+# Stelle sicher, dass vorhandene Log- und DB-Dateien beschreibbar sind
+[ -f "$PROJECT_DIR/flexradiolog.log" ] && chmod 664 "$PROJECT_DIR/flexradiolog.log" 2>/dev/null || true
+[ -f "$PROJECT_DIR/flexradiolog.db" ] && chmod 664 "$PROJECT_DIR/flexradiolog.db" 2>/dev/null || true
+
+# Systemd-Service-Dateien dynamisch anpassen
+echo "Passe Systemd-Service-Vorlagen für Benutzer '$TARGET_USER' und Pfad '$PROJECT_DIR' an..."
+$PYTHON_BIN - <<EOF
+import re
+from pathlib import Path
+
+services = [
+    Path("$PROJECT_DIR/scripts/flexradiolog.service"),
+    Path("$PROJECT_DIR/scripts/loggui.service"),
+]
+target_user = "$TARGET_USER"
+project_dir = "$PROJECT_DIR"
+
+for path in services:
+    if not path.is_file():
+        continue
+    content = path.read_text(encoding="utf-8")
+
+    # User anpassen
+    content = re.sub(r"^User=.*$", f"User={target_user}", content, flags=re.MULTILINE)
+
+    # WorkingDirectory anpassen
+    content = re.sub(r"^WorkingDirectory=.*$", f"WorkingDirectory={project_dir}", content, flags=re.MULTILINE)
+
+    # Pfade in ExecStart anpassen
+    content = re.sub(r"/opt/FlexRadioLog", project_dir, content)
+
+    # ReadWritePaths setzen/aktualisieren
+    if re.search(r"^ReadWritePaths=.*$", content, flags=re.MULTILINE):
+        content = re.sub(r"^ReadWritePaths=.*$", f"ReadWritePaths={project_dir}", content, flags=re.MULTILINE)
+    else:
+        content = re.sub(r"(PrivateTmp=true)", rf"\1\nReadWritePaths={project_dir}", content)
+
+    # Falls das Projekt unter /home liegt, ProtectHome=read-only abschalten
+    if project_dir.startswith("/home/"):
+        content = re.sub(r"^ProtectHome=.*$", "ProtectHome=false", content, flags=re.MULTILINE)
+
+    path.write_text(content, encoding="utf-8")
+print("Service-Dateien erfolgreich aktualisiert.")
+EOF
 
 echo ""
 echo "=== Installation erfolgreich! ==="
@@ -117,17 +224,49 @@ echo "Manueller Start:"
 echo "  Backend API:  ./scripts/run.sh"
 echo "  Web Frontend: ./scripts/run_loggui.sh"
 echo ""
-echo "Einrichtung als Systemd-Dienste (Autostart beim Booten auf Raspberry Pi):"
-if [ "$PROJECT_DIR" != "/opt/FlexRadioLog" ]; then
-    echo "Hinweis: Das Projekt befindet sich in '$PROJECT_DIR' (Dienstdateien erwarten standardmäßig '/opt/FlexRadioLog')."
-    echo "Option A (Empfohlen): Verschieben nach /opt/FlexRadioLog:"
-    echo "  sudo mkdir -p /opt && sudo mv \"$PROJECT_DIR\" /opt/FlexRadioLog"
-    echo "Option B: Pfad in den Service-Dateien anpassen:"
-    echo "  sed -i 's|/opt/FlexRadioLog|$PROJECT_DIR|g' scripts/*.service"
-    echo ""
+
+# Prüfe, ob systemd auf dem System aktiv ist
+HAS_SYSTEMD=false
+if command -v systemctl >/dev/null 2>&1 && [ -d "/etc/systemd/system" ]; then
+    HAS_SYSTEMD=true
 fi
-echo "  sudo cp scripts/flexradiolog.service scripts/loggui.service /etc/systemd/system/"
-echo "  sudo systemctl daemon-reload"
-echo "  sudo systemctl enable flexradiolog loggui"
-echo "  sudo systemctl start flexradiolog loggui"
-echo "  sudo systemctl status flexradiolog loggui"
+
+DO_INSTALL_SERVICES="$AUTO_INSTALL_SERVICES"
+
+if [ "$HAS_SYSTEMD" = true ] && [ "$DO_INSTALL_SERVICES" = false ] && [ -t 0 ]; then
+    echo "Systemd wurde erkannt."
+    read -r -p "Möchtest du die Systemd-Dienste jetzt einrichten, aktivieren und starten? [j/N]: " USER_ANSWER
+    case "$USER_ANSWER" in
+        [jJyY]*)
+            DO_INSTALL_SERVICES=true
+            ;;
+    esac
+fi
+
+if [ "$DO_INSTALL_SERVICES" = true ]; then
+    echo ""
+    echo "Richte Systemd-Dienste ein..."
+    SUDO_PREFIX=""
+    if [ "$(id -u)" -ne 0 ]; then
+        SUDO_PREFIX="sudo"
+    fi
+
+    $SUDO_PREFIX cp "$PROJECT_DIR/scripts/flexradiolog.service" "$PROJECT_DIR/scripts/loggui.service" /etc/systemd/system/
+    $SUDO_PREFIX systemctl daemon-reload
+    $SUDO_PREFIX systemctl enable flexradiolog.service loggui.service
+    $SUDO_PREFIX systemctl restart flexradiolog.service loggui.service
+    echo "Dienste wurden installiert, aktiviert und gestartet!"
+    echo ""
+    echo "Statusprüfung:"
+    $SUDO_PREFIX systemctl --no-pager status flexradiolog.service loggui.service || true
+else
+    echo "Einrichtung als Systemd-Dienste (Autostart beim Booten):"
+    echo "  sudo cp scripts/flexradiolog.service scripts/loggui.service /etc/systemd/system/"
+    echo "  sudo systemctl daemon-reload"
+    echo "  sudo systemctl enable flexradiolog loggui"
+    echo "  sudo systemctl restart flexradiolog loggui"
+    echo ""
+    echo "Status und Logs prüfen:"
+    echo "  sudo systemctl status flexradiolog loggui"
+    echo "  journalctl -u flexradiolog -f"
+fi

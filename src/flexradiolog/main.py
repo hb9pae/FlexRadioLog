@@ -14,12 +14,23 @@ def setup_logging(level_name: str = "INFO", file_path: str | None = None) -> Non
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
 
     if file_path:
-        handlers.append(logging.FileHandler(file_path, encoding="utf-8"))
+        try:
+            handlers.append(logging.FileHandler(file_path, encoding="utf-8"))
+        except PermissionError as exc:
+            sys.stderr.write(
+                f"WARNUNG: Keine Schreibberechtigung für Log-Datei '{file_path}' ({exc}). "
+                "Logging erfolgt weiterhin auf Konsole / journald.\n"
+            )
+        except Exception as exc:
+            sys.stderr.write(
+                f"WARNUNG: Konnte Log-Datei '{file_path}' nicht initialisieren ({exc}).\n"
+            )
 
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=handlers,
+        force=True,
     )
 
 

@@ -18,6 +18,7 @@ StandardError=journal
 ProtectSystem=full
 ProtectHome=read-only
 PrivateTmp=true
+ReadWritePaths=/opt/FlexRadioLog
 
 [Install]
 WantedBy=multi-user.target
